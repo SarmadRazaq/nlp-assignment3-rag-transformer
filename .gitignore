@@ -12,3 +12,6 @@ data/
 *.docx
 !report/*.docx
 ~$*
+smoke/
+smoke.ipynb
+smoke_out.ipynb
