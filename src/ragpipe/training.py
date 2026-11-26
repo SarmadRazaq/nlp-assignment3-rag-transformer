@@ -220,15 +220,18 @@ def rouge_l(hyp, ref):
 
 
 def bleu(hyp, ref, max_n=4):
-    """Sentence BLEU with add-one smoothing on n-gram precisions and a brevity penalty."""
+    """Sentence BLEU with add-one smoothing on n-gram precisions and a brevity penalty.
+    A hypothesis too short to contain any n-gram of some order scores ~0, as in standard BLEU."""
     if not hyp:
         return 0.0
     logs = []
     for n in range(1, max_n + 1):
         h = Counter(tuple(hyp[i:i + n]) for i in range(len(hyp) - n + 1))
+        if not h:
+            return 0.0
         r = Counter(tuple(ref[i:i + n]) for i in range(len(ref) - n + 1))
         overlap = sum(min(c, r[g]) for g, c in h.items())
-        logs.append(math.log((overlap + 1) / (max(sum(h.values()), 0) + 1)))
+        logs.append(math.log((overlap + 1) / (sum(h.values()) + 1)))
     bp = 1.0 if len(hyp) > len(ref) else math.exp(1 - len(ref) / len(hyp))
     return bp * math.exp(sum(logs) / max_n)
 
