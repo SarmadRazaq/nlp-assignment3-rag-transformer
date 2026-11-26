@@ -11,7 +11,8 @@
 #    and anything unseen maps to `<unk>`. Specials: `<pad>`=0, `<unk>`, `<bos>`, `<eos>`.
 # 4. **Numericalisation + padding/truncation** (`encode_fixed`): token ids are truncated to
 #    `MAX_LEN` and right-padded with `<pad>`, along with an attention mask (1 = real token).
-#    `MAX_LEN = 256` covers the full text of ~93% of reviews (see the coverage table below).
+#    `MAX_LEN = 256` keeps the full text of most reviews (the coverage table below gives the exact
+#    share) while keeping the O(T²) attention cost affordable on a 6 GB GPU.
 #    Truncation keeps the beginning of the review, where the verdict usually appears.
 
 # %%

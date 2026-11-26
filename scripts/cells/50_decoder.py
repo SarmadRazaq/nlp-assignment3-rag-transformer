@@ -3,37 +3,58 @@
 #
 # ### 6.1 Reference explanations
 # The dataset has no human-written explanations, so **reference explanations are synthesised**
-# from signals in each review (gold labels, training only):
+# from signals that are all **visible in the decoder's input**:
 # * the review **title** (`summary`), usually a compressed verdict ("great case", "stopped working"),
-# * the two words of the review **most indicative of its sentiment**, using smoothed log-odds of
-#   word vs. other classes fitted on the training split (stopwords removed, min count 20),
-# * the gold **helpfulness** label.
+# * the two words of the (truncated) review **most indicative of the sentiment label**, using
+#   smoothed log-odds of word vs. other classes fitted on the training split (stopwords removed,
+#   min count 20),
+# * the **helpfulness** label.
 #
 # Template: `the review is <sentiment> because the customer says " <title> " and mentions <w1> and
-# <w2> . <helpfulness sentence> .` **Retrieval is never used to build a reference**, so the RAG
-# decoder and the no-retrieval baseline are scored against identical targets. Any gain from
-# retrieval therefore comes from the context, not from leakage into the targets.
+# <w2> . <helpfulness sentence> .` For training and validation the gold labels are used. On the
+# test set the references are built from the **encoder's predicted labels**, because the brief asks
+# for an explanation of *the predicted sentiment*. The explanation must therefore stay consistent
+# with the label in the prompt, even when the encoder is wrong.
+#
+# **Retrieval is never used to build a reference**, so the RAG decoder and the no-retrieval
+# baseline are scored against identical targets. Any gain from retrieval comes from the context,
+# not from leakage into the targets. The flip side is that the target is mostly predictable from
+# the review itself, so retrieval can only help by supplying evidence (similar titles and
+# sentiment vocabulary) that the decoder fails to extract from the review alone. Section 6.5
+# measures how much that is worth.
 #
 # ### 6.2 Input template
 # ```
-# <bos> <review> r1 … r96 <sentiment> LABEL <helpful> H <ctx> <ex> LABEL_1 t1 … t32 <ex> LABEL_2 … <ex> LABEL_3 … <explain>  →  explanation <eos>
+# <bos> <title> t1 … t20 <review> r1 … r96 <sentiment> LABEL <helpful> H <ctx> <ex> LABEL_1 e1 … e32 <ex> LABEL_2 … <ex> LABEL_3 … <explain>  →  explanation <eos>
 # ```
 # Each retrieved example is its *title + ":" + text*, truncated to 32 tokens, and is prefixed by
 # its (gold, training-set) sentiment. The baseline uses `<ctx> <none>` in place of the examples.
-# The model is trained with teacher forcing using gold labels. At test time the **encoder's
-# predicted** labels are inserted, which is the real pipeline. Loss covers only the explanation
-# tokens (prompt positions are masked with -100, unit-tested).
+# Training uses teacher forcing with gold labels. At test time the encoder's predictions are
+# inserted, which is the real pipeline. Loss covers only the explanation tokens (prompt positions
+# are masked with -100, unit-tested).
 
 # %%
+PCFG = PromptConfig(max_title=20, max_review=96, max_retrieved=32)
 lexicon = SentimentLexicon.fit(train_df["tokens"], train_df["sentiment"].values, n_classes=3, min_count=20)
 for c, name in enumerate(SENTIMENT_NAMES):
     top = sorted(lexicon.scores[c], key=lambda w: -lexicon.scores[c][w])[:12]
     print(f"{name:9s} top log-odds words: {top}")
 
-for d in (train_df, val_df, test_df):
-    d["reference"] = [reference_explanation(s, y, h, lexicon.keywords(t, y, n=2))
-                      for s, y, h, t in zip(d["summary"], d["sentiment"], d["helpful"], d["tokens"])]
-    d["ref_tokens"] = d["reference"].str.split()
+
+def make_references(d, sent_labels, help_labels, cfg=PCFG):
+    """References use only what the prompt shows: the clipped title and the clipped review."""
+    return [reference_explanation(" ".join(tt[:cfg.max_title]), int(y), int(h),
+                                  lexicon.keywords(t[:cfg.max_review], int(y), n=2)).split()
+            for tt, t, y, h in zip(d["title_tokens"], d["tokens"], sent_labels, help_labels)]
+
+
+gold = {k: (d["sentiment"].values, d["helpful"].values) for k, d in [("train", train_df), ("val", val_df), ("test", test_df)]}
+pred_test = (enc_out["test"]["sent_pred"], enc_out["test"]["help_pred"])
+for k, d in [("train", train_df), ("val", val_df), ("test", test_df)]:
+    d["ref_tokens"] = make_references(d, *gold[k])
+    d["reference"] = d["ref_tokens"].map(" ".join)
+test_df["ref_tokens_pred"] = make_references(test_df, *pred_test)
+test_df["reference_pred"] = test_df["ref_tokens_pred"].map(" ".join)
 display(train_df[["summary", "rating", "helpful", "reference"]].head(5))
 
 dec_vocab = Vocab.build(list(train_df["tokens"]) + list(train_df["title_tokens"]) + list(train_df["ref_tokens"]),
@@ -43,35 +64,38 @@ print(f"reference length: mean {train_df['ref_tokens'].map(len).mean():.1f} toke
       f"max {train_df['ref_tokens'].map(len).max()}")
 
 # %%
-PCFG = PromptConfig(max_review=96, max_retrieved=32)
 train_neigh = [{"sentiment": int(s), "tokens": tt + [":"] + t}
                for s, tt, t in zip(train_df["sentiment"], train_df["title_tokens"], train_df["tokens"])]
 
 
-def make_pairs(d, retrieved_ids, sent_labels, help_labels, max_ref=60):
+def make_pairs(d, retrieved_ids, sent_labels, help_labels, ref_col="ref_tokens", cfg=PCFG, max_ref=60):
     pairs = []
     for i in range(len(d)):
         retrieved = None if retrieved_ids is None else [train_neigh[j] for j in retrieved_ids[i]]
-        prompt = build_prompt(d["tokens"].iloc[i], int(sent_labels[i]), int(help_labels[i]), retrieved, PCFG)
-        target = dec_vocab.encode(d["ref_tokens"].iloc[i][:max_ref])
+        prompt = build_prompt(d["tokens"].iloc[i], int(sent_labels[i]), int(help_labels[i]), retrieved, cfg,
+                              title_tokens=d["title_tokens"].iloc[i])
+        target = dec_vocab.encode(d[ref_col].iloc[i][:max_ref])
         pairs.append(make_lm_example(dec_vocab.encode(prompt), target, dec_vocab.eos_id))
     return LMExamples(pairs)
 
 
-gold = {k: (d["sentiment"].values, d["helpful"].values) for k, d in [("train", train_df), ("val", val_df), ("test", test_df)]}
-pred_test = (enc_out["test"]["sent_pred"], enc_out["test"]["help_pred"])
-lm = {
-    "rag": {k: make_pairs(d, ret_ids[k], *gold[k]) for k, d in [("train", train_df), ("val", val_df), ("test", test_df)]},
-    "base": {k: make_pairs(d, None, *gold[k]) for k, d in [("train", train_df), ("val", val_df), ("test", test_df)]},
-}
-lm["rag"]["test_pred"] = make_pairs(test_df, ret_ids["test"], *pred_test)
-lm["base"]["test_pred"] = make_pairs(test_df, None, *pred_test)
-rand_ids = np.random.RandomState(SEED).randint(0, len(train_df), ret_ids["test"].shape)
-lm["rag"]["test_random_ctx"] = make_pairs(test_df, rand_ids, *gold["test"])
+def make_lm_sets(cfg=PCFG):
+    splits = [("train", train_df), ("val", val_df), ("test", test_df)]
+    sets = {"rag": {k: make_pairs(d, ret_ids[k], *gold[k], cfg=cfg) for k, d in splits},
+            "base": {k: make_pairs(d, None, *gold[k], cfg=cfg) for k, d in splits}}
+    sets["rag"]["test_pred"] = make_pairs(test_df, ret_ids["test"], *pred_test, ref_col="ref_tokens_pred", cfg=cfg)
+    sets["base"]["test_pred"] = make_pairs(test_df, None, *pred_test, ref_col="ref_tokens_pred", cfg=cfg)
+    rand_ids = np.random.RandomState(SEED).randint(0, len(train_df), ret_ids["test"].shape)
+    sets["rag"]["test_random_ctx"] = make_pairs(test_df, rand_ids, *gold["test"], cfg=cfg)
+    return sets
+
+
+lm = make_lm_sets()
 DEC_MAX_LEN = max(len(x) for v in lm.values() for ds in v.values() for x, _ in ds.pairs) + 1
 print("longest decoder sequence:", DEC_MAX_LEN - 1, "tokens")
 x, y = lm["rag"]["train"][0]
-print("\nexample RAG input :", dec_vocab.decode(x)[:600])
+print("\nexample RAG input :", dec_vocab.decode(x)[:700])
+print("target            :", dec_vocab.decode([t for t in y if t >= 0]))
 
 # %% [markdown]
 # ### 6.3 Hyperparameter sweep (RAG decoder, 3 epochs each, validation perplexity)
@@ -80,7 +104,9 @@ print("\nexample RAG input :", dec_vocab.decode(x)[:600])
 DEC_BASE = dict(d_model=256, n_heads=4, n_layers=4, d_ff=1024, dropout=0.1, lr=5e-4, batch_size=32)
 DEC_SWEEP = [("base", {}), ("lr=1e-3", {"lr": 1e-3}), ("lr=2e-4", {"lr": 2e-4}),
              ("layers=2", {"n_layers": 2}), ("layers=6", {"n_layers": 6}),
-             ("heads=8", {"n_heads": 8}), ("dropout=0.2", {"dropout": 0.2})]
+             ("d_model=384,d_ff=1536", {"d_model": 384, "d_ff": 1536}), ("heads=8", {"n_heads": 8}),
+             ("dropout=0.2", {"dropout": 0.2}), ("batch=64", {"batch_size": 64}),
+             ("max_review=48", {"max_review": 48})]
 
 
 def run_decoder(hp, data, epochs, patience=2, verbose=False):
@@ -96,7 +122,10 @@ def run_decoder(hp, data, epochs, patience=2, verbose=False):
 if RUN_TUNING:
     rows = []
     for name, change in DEC_SWEEP:
-        _, cfg, h = run_decoder({**DEC_BASE, **change}, lm["rag"], epochs=3)
+        data = lm["rag"]
+        if "max_review" in change:  # sequence-length variant: rebuild prompts with a shorter review
+            data = make_lm_sets(PromptConfig(max_title=20, max_review=change["max_review"], max_retrieved=32))["rag"]
+        _, cfg, h = run_decoder({**DEC_BASE, **change}, data, epochs=3)
         best = h.loc[h["val_ppl"].idxmin()]
         rows.append({"config": name, **change, "params_M": round(sum(p.numel() for p in DecoderLM(cfg).parameters()) / 1e6, 2),
                      "best_epoch": int(best["epoch"]), "train_ppl": best["train_ppl"], "val_ppl": best["val_ppl"],
@@ -110,6 +139,9 @@ display(dec_tuning.round(4))
 
 DEC_FINAL = {**DEC_BASE, **dict(DEC_SWEEP)[dec_tuning.loc[dec_tuning["val_ppl"].idxmin(), "config"]]}
 print("final decoder hyperparameters (used for BOTH RAG and baseline):", DEC_FINAL)
+if "max_review" in DEC_FINAL:  # the sweep preferred a different prompt length: rebuild prompts to match
+    PCFG = PromptConfig(max_title=20, max_review=int(DEC_FINAL.pop("max_review")), max_retrieved=32)
+    lm = make_lm_sets(PCFG)
 
 # %% [markdown]
 # ### 6.4 Train the RAG decoder and the no-retrieval baseline
@@ -190,7 +222,8 @@ gen_idx = np.random.RandomState(SEED).choice(len(test_df), N_GEN, replace=False)
 
 def explain_one(variant, i, sent, helpful):
     retrieved = [train_neigh[j] for j in ret_ids["test"][i]] if variant == "rag" else None
-    prompt = build_prompt(test_df["tokens"].iloc[i], int(sent), int(helpful), retrieved, PCFG)
+    prompt = build_prompt(test_df["tokens"].iloc[i], int(sent), int(helpful), retrieved, PCFG,
+                          title_tokens=test_df["title_tokens"].iloc[i])
     out = generate(decoders[variant], dec_vocab.encode(prompt), max_new_tokens=60,
                    eos_id=dec_vocab.eos_id, device=DEVICE)
     return dec_vocab.decode(out).split(), prompt
@@ -200,7 +233,7 @@ gen_rows = []
 t0 = time.time()
 for i in gen_idx:
     s_pred, h_pred = enc_out["test"]["sent_pred"][i], enc_out["test"]["help_pred"][i]
-    ref = test_df["ref_tokens"].iloc[i]
+    ref = test_df["ref_tokens_pred"].iloc[i]  # explanation of the *predicted* labels
     title = set(test_df["title_tokens"].iloc[i])
     for variant in ("rag", "base"):
         hyp, prompt = explain_one(variant, i, s_pred, h_pred)
@@ -243,7 +276,7 @@ def show_example(i):
     for j in ret_ids["test"][i]:
         print(f"  RETRIEVED: [{SENTIMENT_NAMES[train_df['sentiment'].iloc[j]]}] \"{train_df['summary'].iloc[j]}\"")
     g = gen_df[gen_df.idx == i].set_index("variant")["generated"]
-    print(f"  REFERENCE: {r['reference']}")
+    print(f"  REFERENCE: {r['reference_pred']}")
     print(f"  RAG      : {g['rag']}")
     print(f"  BASELINE : {g['base']}\n")
 
