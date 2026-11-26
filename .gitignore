@@ -1,0 +1,14 @@
+# environment
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+
+# raw data and local working files (not part of the submission)
+Dataset/
+data/
+.scratch/
+*.docx
+!report/*.docx
+~$*
