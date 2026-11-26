@@ -78,6 +78,11 @@ class Embeddings(nn.Module):
         self.tok = nn.Embedding(vocab_size, d_model, padding_idx=pad_id)
         self.pos = nn.Embedding(max_len, d_model)
         self.drop = nn.Dropout(dropout)
+        # small init (GPT-2 style); PyTorch's default N(0, 1) makes tied output logits huge
+        nn.init.normal_(self.tok.weight, std=0.02)
+        nn.init.normal_(self.pos.weight, std=0.02)
+        with torch.no_grad():
+            self.tok.weight[pad_id].zero_()
 
     def forward(self, ids):
         pos = torch.arange(ids.size(1), device=ids.device).unsqueeze(0)
