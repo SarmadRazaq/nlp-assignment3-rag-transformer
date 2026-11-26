@@ -15,7 +15,7 @@ from .preprocess import clean_text, tokenize
 
 IGNORE_INDEX = -100
 HELPFUL_TOKENS = ["not_helpful", "helpful"]
-PROMPT_SPECIALS = ["<review>", "<sentiment>", "<helpful>", "<ctx>", "<ex>", "<none>",
+PROMPT_SPECIALS = ["<title>", "<review>", "<sentiment>", "<helpful>", "<ctx>", "<ex>", "<none>",
                    "<explain>", "not_helpful"]
 
 STOPWORDS = set("""
@@ -96,16 +96,18 @@ def reference_explanation(summary, sentiment, helpful, keywords):
 
 @dataclass
 class PromptConfig:
+    max_title: int = 20      # review-title tokens kept in the prompt
     max_review: int = 96     # review tokens kept in the prompt
     max_retrieved: int = 32  # tokens kept per retrieved example
 
 
-def build_prompt(review_tokens, sentiment, helpful, retrieved, cfg):
+def build_prompt(review_tokens, sentiment, helpful, retrieved, cfg, title_tokens=()):
     """Template (one flat token sequence):
-        <bos> <review> r_1..r_n <sentiment> LABEL <helpful> H
+        <bos> <title> t_1..t_m <review> r_1..r_n <sentiment> LABEL <helpful> H
         <ctx> (<ex> LABEL_j e_1..e_m)*k | <none>  <explain>
     `retrieved` is a list of {"sentiment": int, "tokens": [...]}, or None for the baseline."""
-    seq = ["<bos>", "<review>", *review_tokens[:cfg.max_review],
+    seq = ["<bos>", "<title>", *list(title_tokens)[:cfg.max_title],
+           "<review>", *review_tokens[:cfg.max_review],
            "<sentiment>", SENTIMENT_NAMES[sentiment],
            "<helpful>", HELPFUL_TOKENS[helpful], "<ctx>"]
     if retrieved:

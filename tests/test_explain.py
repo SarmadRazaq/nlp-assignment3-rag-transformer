@@ -37,15 +37,15 @@ def test_reference_explanation_without_title_or_keywords_still_reads_cleanly():
                     'with the product . it is probably not very helpful to other shoppers .')
 
 
-CFG = PromptConfig(max_review=5, max_retrieved=3)
+CFG = PromptConfig(max_title=2, max_review=5, max_retrieved=3)
 RETRIEVED = [{"sentiment": 2, "tokens": ["love", "it", "so", "much"]},
              {"sentiment": 0, "tokens": ["broke"]}]
 
 
 def test_prompt_orders_fields_and_truncates_each_segment():
     p = build_prompt(["a", "b", "c", "d", "e", "f"], sentiment=2, helpful=1,
-                     retrieved=RETRIEVED, cfg=CFG)
-    assert p == ["<bos>", "<review>", "a", "b", "c", "d", "e",
+                     retrieved=RETRIEVED, cfg=CFG, title_tokens=["great", "fit", "!"])
+    assert p == ["<bos>", "<title>", "great", "fit", "<review>", "a", "b", "c", "d", "e",
                  "<sentiment>", "positive", "<helpful>", "helpful",
                  "<ctx>", "<ex>", "positive", "love", "it", "so",
                  "<ex>", "negative", "broke", "<explain>"]
@@ -53,7 +53,7 @@ def test_prompt_orders_fields_and_truncates_each_segment():
 
 def test_baseline_prompt_has_no_retrieved_context():
     p = build_prompt(["a"], sentiment=0, helpful=0, retrieved=None, cfg=CFG)
-    assert p == ["<bos>", "<review>", "a", "<sentiment>", "negative",
+    assert p == ["<bos>", "<title>", "<review>", "a", "<sentiment>", "negative",
                  "<helpful>", "not_helpful", "<ctx>", "<none>", "<explain>"]
 
 
